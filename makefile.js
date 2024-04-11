@@ -33,6 +33,12 @@ const config = {
       name: "docspace-plugin-sdk",
       branch: "master",
       entryPoint: "src/index.ts"
+    },
+    {
+      owner: "onlyoffice",
+      name: "docspace-plugin-sdk",
+      branch: "develop",
+      entryPoint: "src/index.ts"
     }
   ]
 }
