@@ -2,7 +2,7 @@
 // @ts-check
 
 import {spawn} from "node:child_process"
-import {mkdtemp, rm, mkdir, rmdir} from "node:fs/promises"
+import {mkdir, mkdtemp, writeFile, rm, rmdir} from "node:fs/promises"
 import {existsSync} from "node:fs"
 import {tmpdir} from "node:os"
 import {join} from "node:path"
@@ -14,7 +14,13 @@ import pack from "./package.json" with {type: "json"}
 
 /**
  * @typedef {Object} Config
+ * @property {ConfigMeta} meta
  * @property {ConfigSource[]} sources
+ */
+
+/**
+ * @typedef {Object} ConfigMeta
+ * @property {string} file
  */
 
 /**
@@ -27,6 +33,9 @@ import pack from "./package.json" with {type: "json"}
 
 /** @type {Config} */
 const config = {
+  meta: {
+    file: "meta.json"
+  },
   sources: [
     {
       owner: "onlyoffice",
@@ -36,6 +45,15 @@ const config = {
     }
   ]
 }
+
+/**
+ * @typedef {Partial<Record<string, MetaBranch>>} Meta
+ */
+
+/**
+ * @typedef {Partial<Record<string, string>>} MetaBranch
+ */
+
 
 main()
 
@@ -53,8 +71,8 @@ function main() {
  * @returns {Promise<void>}
  */
 async function build() {
+  const latest = await fetchLatestMeta(config)
   const rd = rootDir()
-
   const dd = distDir(rd)
   if (!existsSync(dd)) {
     await mkdir(dd)
@@ -85,7 +103,41 @@ async function build() {
   }))
 
   await rmdir(td)
+  await writeMeta(config, dd, latest)
 }
+
+/**
+ * @param {Config} c
+ * @returns {Promise<Meta>}
+ */
+async function fetchLatestMeta(c) {
+  /** @type {Meta} */
+  const m = {}
+  await Promise.all(c.sources.map(async (s) => {
+    let b = m[s.branch]
+    if (b === undefined) {
+      b = {}
+      m[s.branch] = b
+    }
+    b[s.name] = await fetchSHA(s)
+  }))
+  return m
+}
+
+/**
+ * @param {ConfigSource} s
+ * @returns {Promise<string>}
+ */
+async function fetchSHA(s) {
+  const u = `https://api.github.com/repos/${s.owner}/${s.name}/branches/${s.branch}`
+  const r = await fetch(u)
+  if (r.status !== 200) {
+    throw new Error(`Failed to fetch commit SHA for ${s.name}`)
+  }
+  const j = await r.json()
+  return j.commit.sha
+}
+
 
 /**
  * @returns {string}
@@ -160,4 +212,15 @@ async function generateJSON(opts, f) {
  */
 async function rf(p) {
   await rm(p, {recursive: true, force: true})
+}
+
+/**
+ * @param {Config} c
+ * @param {string} d
+ * @param {Meta} m
+ * @returns {Promise<void>}
+ */
+async function writeMeta(c, d, m) {
+  const f = join(d, c.meta.file)
+  await writeFile(f, JSON.stringify(m, undefined, 2))
 }
