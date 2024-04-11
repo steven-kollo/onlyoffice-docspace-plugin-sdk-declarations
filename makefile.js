@@ -2,6 +2,7 @@
 // @ts-check
 
 import {spawn} from "node:child_process"
+import {Console as NodeConsole} from "node:console"
 import {mkdir, mkdtemp, writeFile, rm, rmdir} from "node:fs/promises"
 import {existsSync} from "node:fs"
 import {tmpdir} from "node:os"
@@ -20,6 +21,9 @@ import pack from "./package.json" with {type: "json"}
 
 /**
  * @typedef {Object} ConfigMeta
+ * @property {string} owner
+ * @property {string} name
+ * @property {string} branch
  * @property {string} file
  */
 
@@ -34,6 +38,9 @@ import pack from "./package.json" with {type: "json"}
 /** @type {Config} */
 const config = {
   meta: {
+    owner: "vanyauhalin",
+    name: "onlyoffice-docspace-plugin-sdk-declarations",
+    branch: "dist",
     file: "meta.json"
   },
   sources: [
@@ -54,7 +61,7 @@ const config = {
  * @typedef {Partial<Record<string, string>>} MetaBranch
  */
 
-
+const console = createConsole()
 main()
 
 /**
@@ -72,6 +79,12 @@ function main() {
  */
 async function build() {
   const latest = await fetchLatestMeta(config)
+  const current = await fetchCurrentMeta(config)
+  if (deepEqual(current, latest)) {
+    console.info("No updates")
+    return
+  }
+
   const rd = rootDir()
   const dd = distDir(rd)
   if (!existsSync(dd)) {
@@ -122,6 +135,54 @@ async function fetchLatestMeta(c) {
     b[s.name] = await fetchSHA(s)
   }))
   return m
+}
+
+/**
+ * @param {Config} c
+ * @returns {Promise<Meta>}
+ */
+async function fetchCurrentMeta(c) {
+  const u = `https://raw.githubusercontent.com/${c.meta.owner}/${c.meta.name}/${c.meta.branch}/${c.meta.file}`
+  const r = await fetch(u)
+  if (r.status !== 200) {
+    return {}
+  }
+  return r.json()
+}
+
+/**
+ * @param {any} a
+ * @param {any} b
+ * @returns {boolean}
+ */
+function deepEqual(a, b) {
+  if (typeof a !== typeof b) {
+    return false
+  }
+
+  if (typeof a === "object") {
+    const m = Object.keys(a)
+    const n = Object.keys(b)
+    if (m.length !== n.length) {
+      return false
+    }
+
+    for (const k of m) {
+      const x = a[k]
+      const y = b[k]
+      if (!deepEqual(x, y)) {
+        return false
+      }
+    }
+
+    return true
+  }
+
+  if (a !== b) {
+    return false
+  }
+
+  return true
 }
 
 /**
@@ -223,4 +284,29 @@ async function rf(p) {
 async function writeMeta(c, d, m) {
   const f = join(d, c.meta.file)
   await writeFile(f, JSON.stringify(m, undefined, 2))
+}
+
+/**
+ * @returns {Console}
+ */
+function createConsole() {
+  // This exists only to allow the class to be placed at the end of the file.
+  class Console extends NodeConsole {
+    /**
+     * @param  {...any} data
+     * @returns {void}
+     */
+    info(...data) {
+      super.info("info:", ...data)
+    }
+
+    /**
+     * @param  {...any} data
+     * @returns {void}
+     */
+    warn(...data) {
+      super.warn("warn:", ...data)
+    }
+  }
+  return new Console(process.stdout, process.stderr)
 }
