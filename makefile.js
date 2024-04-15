@@ -1,16 +1,20 @@
 #!/usr/bin/env node
 // @ts-check
 
+/**
+ * @typedef {import("typedoc").TypeDocOptions} TypeDocOptions
+ */
+
 import {spawn} from "node:child_process"
 import {Console as NodeConsole} from "node:console"
 import {mkdir, mkdtemp, writeFile, rm, rmdir} from "node:fs/promises"
 import {existsSync} from "node:fs"
 import {tmpdir} from "node:os"
-import {join} from "node:path"
-import {argv} from "node:process"
+import {join, relative} from "node:path"
+import {argv, cwd, env, stderr, stdout} from "node:process"
 import {fileURLToPath} from "node:url"
 import sade from "sade"
-import {Application} from "typedoc"
+import {Application, JSONOutput} from "typedoc"
 import pack from "./package.json" with {type: "json"}
 
 /**
@@ -49,6 +53,12 @@ const config = {
       name: "docspace-plugin-sdk",
       branch: "master",
       entryPoint: "src/index.ts"
+    },
+    {
+      owner: "onlyoffice",
+      name: "docspace-plugin-sdk",
+      branch: "develop",
+      entryPoint: "src/index.ts"
     }
   ]
 }
@@ -61,6 +71,11 @@ const config = {
  * @typedef {Partial<Record<string, string>>} MetaBranch
  */
 
+/**
+ * @typedef {Object} BuildOptions
+ * @property {string} force
+ */
+
 const console = createConsole()
 main()
 
@@ -70,19 +85,36 @@ main()
 function main() {
   sade("./makefile.js")
     .command("build")
-    .action(build)
+    .option("--force", "Force build", false)
+    .action(async (opts) => {
+      if (isForceBuild()) {
+        opts.force = true
+      }
+      await build(opts)
+    })
     .parse(argv)
 }
 
 /**
+ * @returns {boolean}
+ */
+function isForceBuild() {
+  return env.MAKEFILE_BUILD_FORCE === "true"
+}
+
+/**
+ * @param {BuildOptions} opts
  * @returns {Promise<void>}
  */
-async function build() {
+async function build(opts) {
   const latest = await fetchLatestMeta(config)
-  const current = await fetchCurrentMeta(config)
-  if (deepEqual(current, latest)) {
-    console.info("No updates")
-    return
+
+  if (!opts.force) {
+    const current = await fetchCurrentMeta(config)
+    if (deepEqual(current, latest)) {
+      console.info("No updates")
+      return
+    }
   }
 
   const rd = rootDir()
@@ -92,11 +124,19 @@ async function build() {
   }
 
   const td = await createTempDir()
-
   await Promise.all(config.sources.map(async (s) => {
+    const b = latest[s.branch]
+    if (b === undefined) {
+      throw new Error(`Branch ${s.branch} is missing`)
+    }
+
+    const sha = b[s.name]
+    if (sha === undefined) {
+      throw new Error(`Commit SHA for ${s.name} is missing`)
+    }
+
     const st = join(td, s.branch)
     await mkdir(st)
-
     await cloneRepo(st, s)
 
     const sd = join(dd, s.branch)
@@ -104,13 +144,18 @@ async function build() {
       await mkdir(sd)
     }
 
-    await generateJSON(
-      {
-        entryPoints: [join(st, s.entryPoint)],
-        tsconfig: tsconfigFile(st)
-      },
-      join(sd, `${s.name}.json`)
-    )
+    let o = await generateObject({
+      entryPoints: [join(st, s.entryPoint)],
+      tsconfig: tsconfigFile(st),
+      readme: "none"
+    })
+
+    const r = relative(rd, st)
+    o = modifyObject(r, o, s, sha)
+
+    const f = join(sd, `${s.name}.json`)
+    const c = JSON.stringify(o, null, 2)
+    await writeFile(f, c)
 
     await rf(st)
   }))
@@ -151,6 +196,99 @@ async function fetchCurrentMeta(c) {
 }
 
 /**
+ * @param {ConfigSource} s
+ * @returns {Promise<string>}
+ */
+async function fetchSHA(s) {
+  const u = `https://api.github.com/repos/${s.owner}/${s.name}/branches/${s.branch}`
+  const r = await fetch(u)
+  if (r.status !== 200) {
+    throw new Error(`Failed to fetch commit SHA for ${s.name}`)
+  }
+  const j = await r.json()
+  return j.commit.sha
+}
+
+/**
+ * @param {string} d
+ * @param {ConfigSource} s
+ * @returns {Promise<void>}
+ */
+function cloneRepo(d, s) {
+  return new Promise((res, rej) => {
+    const g = spawn("git", [
+      "clone",
+      "--progress",
+      "--depth", "1",
+      "--branch", s.branch,
+      "--single-branch",
+      `https://github.com/${s.owner}/${s.name}.git`,
+      d
+    ])
+    g.on("close", res)
+    g.on("error", rej)
+  })
+}
+
+/**
+ * @param {string} d
+ * @returns {string}
+ */
+function tsconfigFile(d) {
+  return join(d, "tsconfig.json")
+}
+
+/**
+ * @param {Partial<TypeDocOptions>} opts
+ * @returns {Promise<JSONOutput.ProjectReflection>}
+ */
+async function generateObject(opts) {
+  const a = await Application.bootstrapWithPlugins(opts)
+  const p = await a.convert()
+  if (p === undefined) {
+    throw new Error("Project is missing")
+  }
+  return a.serializer.projectToObject(p, cwd())
+}
+
+/**
+ * @param {string} p
+ * @param {JSONOutput.ProjectReflection} o
+ * @param {ConfigSource} s
+ * @param {string} sha
+ * @returns {JSONOutput.ProjectReflection}
+ */
+function modifyObject(p, o, s, sha) {
+  for (const k of Object.keys(o.symbolIdMap)) {
+    const v = o.symbolIdMap[k]
+    v.sourceFileName = v.sourceFileName.replace(p, "")
+    v.sourceFileName = sourceReference(s, v.sourceFileName, sha)
+  }
+  return o
+}
+
+/**
+ * @param {ConfigSource} s
+ * @param {string} p
+ * @param {string} h
+ * @returns {string}
+ */
+function sourceReference(s, p, h) {
+  return `https://api.github.com/repos/${s.owner}/${s.name}/contents${p}?ref=${h}`
+}
+
+/**
+ * @param {Config} c
+ * @param {string} d
+ * @param {Meta} m
+ * @returns {Promise<void>}
+ */
+async function writeMeta(c, d, m) {
+  const f = join(d, c.meta.file)
+  await writeFile(f, JSON.stringify(m, undefined, 2))
+}
+
+/**
  * @param {any} a
  * @param {any} b
  * @returns {boolean}
@@ -186,21 +324,6 @@ function deepEqual(a, b) {
 }
 
 /**
- * @param {ConfigSource} s
- * @returns {Promise<string>}
- */
-async function fetchSHA(s) {
-  const u = `https://api.github.com/repos/${s.owner}/${s.name}/branches/${s.branch}`
-  const r = await fetch(u)
-  if (r.status !== 200) {
-    throw new Error(`Failed to fetch commit SHA for ${s.name}`)
-  }
-  const j = await r.json()
-  return j.commit.sha
-}
-
-
-/**
  * @returns {string}
  */
 function rootDir() {
@@ -225,65 +348,11 @@ function createTempDir() {
 }
 
 /**
- * @param {string} d
- * @param {ConfigSource} s
- * @returns {Promise<void>}
- */
-function cloneRepo(d, s) {
-  return new Promise((res, rej) => {
-    const g = spawn("git", [
-      "clone",
-      "--progress",
-      "--depth", "1",
-      "--branch", s.branch,
-      "--single-branch",
-      `https://github.com/${s.owner}/${s.name}.git`,
-      d
-    ])
-    g.on("close", res)
-    g.on("error", rej)
-  })
-}
-
-/**
- * @param {string} d
- * @returns {string}
- */
-function tsconfigFile(d) {
-  return join(d, "tsconfig.json")
-}
-
-/**
- * @param {Parameters<typeof Application.bootstrapWithPlugins>[0]} opts
- * @param {string} f
- * @returns {Promise<void>}
- */
-async function generateJSON(opts, f) {
-  const a = await Application.bootstrapWithPlugins(opts);
-  const p = await a.convert();
-  if (p === undefined) {
-    throw new Error("Project is missing")
-  }
-  await a.generateJson(p, f);
-}
-
-/**
  * @param {string} p
  * @returns {Promise<void>}
  */
 async function rf(p) {
   await rm(p, {recursive: true, force: true})
-}
-
-/**
- * @param {Config} c
- * @param {string} d
- * @param {Meta} m
- * @returns {Promise<void>}
- */
-async function writeMeta(c, d, m) {
-  const f = join(d, c.meta.file)
-  await writeFile(f, JSON.stringify(m, undefined, 2))
 }
 
 /**
@@ -308,5 +377,6 @@ function createConsole() {
       super.warn("warn:", ...data)
     }
   }
-  return new Console(process.stdout, process.stderr)
+
+  return new Console(stdout, stderr)
 }
