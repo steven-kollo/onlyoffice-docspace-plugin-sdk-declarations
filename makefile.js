@@ -11,7 +11,7 @@ import {mkdir, mkdtemp, writeFile, rm, rmdir} from "node:fs/promises"
 import {existsSync} from "node:fs"
 import {tmpdir} from "node:os"
 import {join, relative} from "node:path"
-import {argv, cwd, stderr, stdout} from "node:process"
+import {argv, cwd, env, stderr, stdout} from "node:process"
 import {fileURLToPath} from "node:url"
 import sade from "sade"
 import {Application, JSONOutput} from "typedoc"
@@ -71,6 +71,11 @@ const config = {
  * @typedef {Partial<Record<string, string>>} MetaBranch
  */
 
+/**
+ * @typedef {Object} BuildOptions
+ * @property {string} force
+ */
+
 const console = createConsole()
 main()
 
@@ -80,19 +85,36 @@ main()
 function main() {
   sade("./makefile.js")
     .command("build")
-    .action(build)
+    .option("--force", "Force build", false)
+    .action(async (opts) => {
+      if (isForceBuild()) {
+        opts.force = true
+      }
+      await build(opts)
+    })
     .parse(argv)
 }
 
 /**
+ * @returns {boolean}
+ */
+function isForceBuild() {
+  return env.MAKEFILE_BUILD_FORCE === "true"
+}
+
+/**
+ * @param {BuildOptions} opts
  * @returns {Promise<void>}
  */
-async function build() {
+async function build(opts) {
   const latest = await fetchLatestMeta(config)
-  const current = await fetchCurrentMeta(config)
-  if (deepEqual(current, latest)) {
-    console.info("No updates")
-    return
+
+  if (!opts.force) {
+    const current = await fetchCurrentMeta(config)
+    if (deepEqual(current, latest)) {
+      console.info("No updates")
+      return
+    }
   }
 
   const rd = rootDir()
